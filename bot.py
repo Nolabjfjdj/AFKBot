@@ -3,6 +3,7 @@ import logging
 import os
 
 import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -70,11 +71,32 @@ async def deco(interaction: discord.Interaction):
     logger.info("Déconnexion demandée par %s (%s)", interaction.user, interaction.user.id)
 
 
+async def health_check(request: web.Request) -> web.Response:
+    return web.Response(text="AFKBot is running.", status=200)
+
+
+async def start_health_server() -> web.AppRunner:
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("Serveur de santé HTTP lancé sur le port %s", port)
+    return runner
+
+
 async def main():
     if not TOKEN:
         raise RuntimeError("Le jeton Discord manque : ajoute DISCORD_TOKEN dans le fichier .env.")
-    async with bot:
-        await bot.start(TOKEN)
+    runner = await start_health_server()
+    try:
+        async with bot:
+            await bot.start(TOKEN)
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
