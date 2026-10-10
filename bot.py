@@ -18,6 +18,8 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 desired_voice_channels: dict[int, int] = {}
+voice_disconnected_since: dict[int, float] = {}
+VOICE_RECONNECT_GRACE_SECONDS = 120
 
 
 @bot.event
@@ -30,9 +32,10 @@ async def on_ready():
     if not voice_watchdog.is_running():
         voice_watchdog.start()
     logger.info("Connecté en tant que %s (ID : %s)", bot.user, bot.user.id)
+    logger.info("Version discord.py : %s", discord.__version__)
 
 
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=15)
 async def voice_watchdog():
     for guild_id, channel_id in list(desired_voice_channels.items()):
         guild = bot.get_guild(guild_id)
@@ -45,7 +48,8 @@ async def voice_watchdog():
             continue
 
         voice_client = guild.voice_client
-        if voice_client and voice_client.is_connected():
+        if voice_client is not None and voice_client.is_connected():
+            voice_disconnected_since.pop(guild_id, None)
             if voice_client.channel and voice_client.channel.id != channel_id:
                 try:
                     await voice_client.move_to(channel)
@@ -53,16 +57,29 @@ async def voice_watchdog():
                     logger.exception("Impossible de replacer AFKBot dans le salon vocal %s.", channel_id)
             continue
 
+        now = asyncio.get_running_loop().time()
+        disconnected_at = voice_disconnected_since.setdefault(guild_id, now)
+
+        # discord.py already retries temporary voice WebSocket failures.
+        # Do not force-disconnect its VoiceClient while those retries may be active.
+        if voice_client is not None and now - disconnected_at < VOICE_RECONNECT_GRACE_SECONDS:
+            continue
+
         try:
             if voice_client is not None:
+                logger.warning(
+                    "Connexion vocale toujours inactive après %s secondes ; nettoyage de l'ancienne connexion.",
+                    VOICE_RECONNECT_GRACE_SECONDS,
+                )
                 try:
                     await voice_client.disconnect(force=True)
                 except (discord.HTTPException, discord.ClientException):
                     logger.warning("Nettoyage de l'ancienne connexion vocale impossible.", exc_info=True)
-            await channel.connect(timeout=20, reconnect=True)
-            logger.info("Reconnexion automatique au salon vocal %s (%s).", channel.name, channel.id)
+            await channel.connect(timeout=30, reconnect=True)
+            voice_disconnected_since.pop(guild_id, None)
+            logger.info("Connexion vocale rétablie dans %s (%s).", channel.name, channel.id)
         except (discord.Forbidden, discord.HTTPException, discord.ClientException, asyncio.TimeoutError):
-            logger.exception("Échec de la reconnexion automatique au salon vocal %s.", channel_id)
+            logger.exception("Échec de la reconnexion vocale au salon %s ; nouvelle tentative ultérieure.", channel_id)
 
 
 @voice_watchdog.before_loop
