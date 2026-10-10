@@ -25,7 +25,7 @@ Ne partage jamais ton jeton et ne le commit pas dans GitHub. Le fichier `.env` e
 
 GitHub stocke le code mais ne fait pas tourner le bot. Pour qu'AFKBot reste connecté 24 h/24, lance-le sur un hébergement qui maintient un processus Python actif et autorise les connexions vocales Discord.
 
-La reconnexion intégrée à la connexion vocale gère les interruptions temporaires du réseau. Si le bot est explicitement déconnecté du salon, utilise `/rejoindre` pour le faire revenir.
+Un contrôle automatique vérifie toutes les 30 secondes si le bot est toujours dans le salon choisi avec `/rejoindre` et tente de le reconnecter en cas de déconnexion inattendue. Utilise `/deco` pour quitter le vocal et désactiver cette reconnexion automatique. Le salon choisi est conservé uniquement en mémoire : si le processus redémarre, relance `/rejoindre`.
 
 ## Vérification avec UptimeRobot
 
