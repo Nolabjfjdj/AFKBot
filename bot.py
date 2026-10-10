@@ -5,7 +5,7 @@ import os
 import discord
 from aiohttp import web
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +17,8 @@ logger = logging.getLogger("AFKBot")
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+desired_voice_channels: dict[int, int] = {}
+
 
 @bot.event
 async def on_ready():
@@ -25,7 +27,47 @@ async def on_ready():
         logger.info("Commandes synchronisées : %s", len(synced))
     except discord.HTTPException:
         logger.exception("Impossible de synchroniser les commandes.")
+    if not voice_watchdog.is_running():
+        voice_watchdog.start()
     logger.info("Connecté en tant que %s (ID : %s)", bot.user, bot.user.id)
+
+
+@tasks.loop(seconds=30)
+async def voice_watchdog():
+    for guild_id, channel_id in list(desired_voice_channels.items()):
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            continue
+
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.VoiceChannel):
+            logger.warning("Le salon vocal mémorisé %s n'est plus accessible.", channel_id)
+            continue
+
+        voice_client = guild.voice_client
+        if voice_client and voice_client.is_connected():
+            if voice_client.channel and voice_client.channel.id != channel_id:
+                try:
+                    await voice_client.move_to(channel)
+                except (discord.HTTPException, discord.ClientException):
+                    logger.exception("Impossible de replacer AFKBot dans le salon vocal %s.", channel_id)
+            continue
+
+        try:
+            if voice_client is not None:
+                try:
+                    await voice_client.disconnect(force=True)
+                except (discord.HTTPException, discord.ClientException):
+                    logger.warning("Nettoyage de l'ancienne connexion vocale impossible.", exc_info=True)
+            await channel.connect(timeout=20, reconnect=True)
+            logger.info("Reconnexion automatique au salon vocal %s (%s).", channel.name, channel.id)
+        except (discord.Forbidden, discord.HTTPException, discord.ClientException, asyncio.TimeoutError):
+            logger.exception("Échec de la reconnexion automatique au salon vocal %s.", channel_id)
+
+
+@voice_watchdog.before_loop
+async def before_voice_watchdog():
+    await bot.wait_until_ready()
 
 
 @bot.tree.command(name="rejoindre", description="Fait rejoindre AFKBot à un salon vocal.")
@@ -42,15 +84,23 @@ async def rejoindre(interaction: discord.Interaction, salon: discord.VoiceChanne
     try:
         if voice_client and voice_client.is_connected():
             if voice_client.channel and voice_client.channel.id == salon.id:
-                await interaction.followup.send(f"Je suis déjà connecté à {salon.mention}.", ephemeral=True)
+                desired_voice_channels[interaction.guild.id] = salon.id
+                await interaction.followup.send(f"Je suis déjà connecté à {salon.mention}. Je surveille la connexion et tenterai de revenir si elle tombe.", ephemeral=True)
                 return
             await voice_client.move_to(salon)
         else:
+            if voice_client is not None:
+                try:
+                    await voice_client.disconnect(force=True)
+                except (discord.HTTPException, discord.ClientException):
+                    logger.warning("Nettoyage de l'ancienne connexion vocale impossible.", exc_info=True)
             await salon.connect(timeout=20, reconnect=True)
-        await interaction.followup.send(f"✅ Je suis connecté à {salon.mention}. Je reste ici jusqu'à /deco ou une déconnexion.", ephemeral=True)
+
+        desired_voice_channels[interaction.guild.id] = salon.id
+        await interaction.followup.send(f"✅ Je suis connecté à {salon.mention}. Je surveille la connexion et tenterai de revenir si elle tombe. Utilise /deco pour arrêter cette reconnexion automatique.", ephemeral=True)
         logger.info("Connexion au salon %s (%s) demandée par %s (%s)", salon.name, salon.id, interaction.user, interaction.user.id)
-    except (discord.Forbidden, discord.HTTPException, discord.ClientException, asyncio.TimeoutError) as error:
-        logger.warning("Échec de connexion vocale : %s", error)
+    except (discord.Forbidden, discord.HTTPException, discord.ClientException, asyncio.TimeoutError):
+        logger.exception("Échec de connexion vocale.")
         await interaction.followup.send("❌ Impossible de rejoindre ce salon. Vérifie mes permissions Voir le salon et Se connecter.", ephemeral=True)
 
 
@@ -61,13 +111,16 @@ async def deco(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_guild:
         await interaction.response.send_message("Tu dois avoir la permission Gérer le serveur pour utiliser cette commande.", ephemeral=True)
         return
+
+    desired_voice_channels.pop(interaction.guild.id, None)
     voice_client = interaction.guild.voice_client
     if voice_client is None or not voice_client.is_connected():
-        await interaction.response.send_message("Je ne suis connecté à aucun salon vocal.", ephemeral=True)
+        await interaction.response.send_message("Je ne suis connecté à aucun salon vocal. La reconnexion automatique est désactivée.", ephemeral=True)
         return
+
     channel_name = voice_client.channel.name if voice_client.channel else "le salon vocal"
     await voice_client.disconnect(force=True)
-    await interaction.response.send_message(f"👋 Je me suis déconnecté de {channel_name}.", ephemeral=True)
+    await interaction.response.send_message(f"👋 Je me suis déconnecté de {channel_name} et j'ai désactivé la reconnexion automatique.", ephemeral=True)
     logger.info("Déconnexion demandée par %s (%s)", interaction.user, interaction.user.id)
 
 
@@ -96,6 +149,8 @@ async def main():
         async with bot:
             await bot.start(TOKEN)
     finally:
+        if voice_watchdog.is_running():
+            voice_watchdog.cancel()
         await runner.cleanup()
 
 
